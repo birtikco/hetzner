@@ -10,13 +10,17 @@ Tek komutla **Docker + Portainer + Nginx Proxy Manager** kuruyor, **fail2ban + U
 
 ### Mevcut sunucuda (build/rebuild sonrası)
 
-```bash
-# Tek satırda (Bash 4+ gerektirir):
-curl -fsSL https://raw.githubusercontent.com/birtikco/hetzner/main/setup.sh | \
-  SSH_KEY="ssh-ed25519 AAAA... user@host" bash
+- Tek satırda (Bash 4+ gerektirir):
 
-# Veya manuel:
-wget https://raw.githubusercontent.com/birtikco/hetzner/main/setup.sh
+```bash
+curl -fsSL https://raw.githubusercontent.com/birtikco/hetzner/refs/heads/main/setup.sh | \
+  SSH_KEY="ssh-ed25519 AAAA... user@host" bash
+```
+
+- Veya manuel:
+
+```bash
+wget https://raw.githubusercontent.com/birtikco/hetzner/refs/heads/main/setup.sh
 chmod +x setup.sh
 ./setup.sh "ssh-ed25519 AAAA... user@host"
 ```

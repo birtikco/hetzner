@@ -8,6 +8,14 @@ Tek komutla **Docker + Portainer + Nginx Proxy Manager** kuruyor, **fail2ban + U
 
 ## 🚀 Hızlı Başlangıç
 
+### Lokalde
+
+- SSH Public Key al:
+
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+
 ### Mevcut sunucuda (build/rebuild sonrası)
 
 - Tek satırda (Bash 4+ gerektirir):

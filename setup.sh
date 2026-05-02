@@ -86,7 +86,7 @@ cat << "EOF"
    ╚═════╝ ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝╚═╝  ╚═╝
 EOF
 echo -e "${NC}"
-echo -e "   ${DIM}${WHITE}Hetzner • Ubuntu 24.04 • Docker • NPM • Portainer${NC}"
+echo -e "   ${DIM}${WHITE}Hetzner • Ubuntu 24.04 • Docker • Portainer • NPM${NC}"
 echo -e "   ${GRAY}─────────────────────────────────────────────────${NC}"
 echo ""
 sleep 1

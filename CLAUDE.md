@@ -41,34 +41,52 @@ Formatı: `echo -e "${CYAN}metin${NC}"`
 
 ## Kurulum Adımları (setup.sh)
 
-Script 9 adımda çalışır:
+Script 10 adımda çalışır:
 
-1. **SSH Anahtarı** — authorized_keys'e genel anahtar ekle
+1. **SSH Anahtarı** — authorized_keys'e genel anahtar ekle (root)
 2. **Sistem Güncellemesi** — apt update + upgrade
 3. **Paketler** — temel sistem paketlerini yükle
-4. **SSH Sertleştirme** — port 3131, şifre devre dışı, MaxAuthTries 3
-5. **fail2ban** — brute force koruması (3 deneme → 24 saat ban, katlanarak artar)
-6. **UFW** — güvenlik duvarı (default deny incoming, açık portlar: 3131, 80, 443, 9443, 8000)
-7. **Docker** — Docker CE + Compose plugin + Buildx plugin
-8. **Portainer** — Docker yönetim arayüzü (container + volume oluştur, proxy ağına bağla)
-9. **Nginx Proxy Manager** — docker-compose.yml ile NPM kurulumu
+4. **Deploy User (CI/CD)** — `deploy-user` oluştur, SSH key ekle, sudoers minimum yetki
+5. **SSH Sertleştirme** — port 3131, şifre devre dışı, MaxAuthTries 3, AllowUsers `root deploy-user`
+6. **fail2ban** — brute force koruması (3 deneme → 24 saat ban, katlanarak artar)
+7. **UFW** — güvenlik duvarı (default deny incoming, açık portlar: 3131, 80, 443, 9443, 8000)
+8. **Docker** — Docker CE + Compose plugin + Buildx plugin, `deploy-user` docker grubuna eklenir
+9. **Portainer** — Docker yönetim arayüzü (container + volume oluştur, proxy ağına bağla)
+10. **Nginx Proxy Manager** — docker-compose.yml ile NPM kurulumu
 
 ## SSH Key Kaynağı
 
 Script'te 3 şekilde SSH key sağlanabilir (sıralı kontrol):
 
-1. **Komut satırı argümanı:** `./setup.sh "ssh-ed25519 AAAA... user@host"`
-2. **Ortam değişkeni:** `SSH_KEY="..." ./setup.sh`
-3. **İnteraktif sorgu:** `./setup.sh` (script sorar)
+1. **Komut satırı argümanı:** `./setup.sh "ssh-ed25519 ROOT_KEY..." "ssh-ed25519 DEPLOY_KEY..."`
+2. **Ortam değişkeni:** `SSH_KEY="..." DEPLOY_KEY="..." ./setup.sh`
+3. **İnteraktif sorgu:** `./setup.sh` (script root key'i sorar; DEPLOY_KEY verilmezse SSH_KEY fallback)
 
 Key formatı doğrulaması regex ile yapılır: `ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-*`, veya `ssh-dss`
+
+**`DEPLOY_KEY` opsiyoneldir.** Verilmezse root SSH key'i deploy-user için de kullanılır. CI/CD için ayrı key önerilir (key rotation kolay, leak halinde insan operatör etkilenmez).
+
+## Deploy User Politikası
+
+`deploy-user` CI/CD için tasarlanmış sınırlı yetkili kullanıcıdır:
+
+- **Kimlik:** `useradd --create-home --shell /bin/bash deploy-user`, şifre kilitli (`passwd -l`)
+- **SSH:** Yalnızca key auth, AllowUsers whitelist'inde
+- **Docker:** `docker` grubu üyesi → `docker load/run/stop/rm/image prune` komutları sudo'suz çalışır
+- **Sudoers:** `/etc/sudoers.d/deploy-user` — NOPASSWD sadece `journalctl` ve `ufw status` (debug için)
+
+**Bilinçli trade-off:** Docker grubu üyeliği fiili root yetkisidir (`docker run -v /:/host` ile filesystem). Bu kaçınılmaz çünkü CI/CD'nin docker'a erişmesi gerekiyor. Asıl güvenlik kazancı **SSH key auth** + **dedicated kullanıcı izolasyonu** + **root parola leak'inin etkisizleşmesi**.
+
+**Yeni komut eklerken:** Sudoers kapsamını gerçekten kullanılan komutlarla sınırla. `apt-get`, `useradd`, `visudo`, `systemctl restart *` gibi geniş yetkileri ekleme — gerekirse spesifik olarak whitelist'e ekle.
 
 ## Önemli Notlar
 
 **Idempotent Değil:** Script aynı sunucuda iki kez çalıştırılırsa:
 - UFW kuralları sıfırlanır
 - fail2ban config'i sıfırlanır
-- SSH key'ler yığılır (append mode)
+- Root SSH key'leri yığılır (append mode)
+
+**Deploy User adımı idempotent yazılmıştır:** İkinci çalıştırmada `deploy-user` zaten varsa atlanır, deploy key zaten authorized_keys'teyse tekrar eklenmez.
 
 **SSH Port Değişimi:** Kurulum sonrası SSH portu 22'den 3131'e taşınır. Yerel `~/.ssh/config` güncellenmesi gerekir.
 

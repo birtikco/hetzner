@@ -22,7 +22,7 @@ cat ~/.ssh/id_ed25519.pub
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/birtikco/hetzner/refs/heads/main/setup.sh | \
-  SSH_KEY="ssh-ed25519 AAAA... user@host" bash
+  SSH_KEY="ssh-ed25519 AAAA... user@host" DEPLOY_KEY="ssh-ed25519 AAAA... user@host" bash
 ```
 
 - Veya manuel:
@@ -30,8 +30,10 @@ curl -fsSL https://raw.githubusercontent.com/birtikco/hetzner/refs/heads/main/se
 ```bash
 wget https://raw.githubusercontent.com/birtikco/hetzner/refs/heads/main/setup.sh
 chmod +x setup.sh
-./setup.sh "ssh-ed25519 AAAA... user@host"
+./setup.sh "ssh-ed25519 AAAA... user@host" "ssh-ed25519 AAAA... user@host"
 ```
+
+`DEPLOY_KEY` opsiyoneldir — verilmezse root key'i deploy-user için de kullanılır.
 
 ---
 
@@ -56,6 +58,8 @@ chmod +x setup.sh
 | Şifreyle SSH | Devre dışı |
 | Root login | `prohibit-password` (sadece SSH key) |
 | MaxAuthTries | `3` |
+| AllowUsers | `root deploy-user` (whitelist) |
+| Deploy User | `deploy-user` — docker grubu, NOPASSWD sudo: `journalctl`, `ufw status` |
 | fail2ban | 3 başarısız deneme → 24h ban, katlanarak artar (max 1 hafta) |
 | UFW | Default deny, sadece açıkça izin verilen portlar |
 
@@ -128,6 +132,49 @@ Sonra Nginx Proxy Manager arayüzünden:
 
 ---
 
+## 🤖 CI/CD Bağlantısı (GitHub Actions)
+
+Kurulum `deploy-user` adında sınırlı yetkili bir kullanıcı oluşturur. CI/CD bu kullanıcı üzerinden SSH key ile bağlanır.
+
+### GitHub Repo Secrets
+
+| Secret | Değer |
+|--------|-------|
+| `DEPLOY_SSH_KEY` | `deploy-user` private key (örn: `id_ed25519_deploy`) |
+| `SERVER_HOST` | Sunucu IP'si |
+| `SERVER_USER` | `deploy-user` |
+| `SERVER_PORT` | `3131` |
+
+### Örnek Workflow (deploy step)
+
+```yaml
+- uses: webfactory/ssh-agent@v0.9.0
+  with:
+    ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+- name: Deploy
+  run: |
+    # Image'ı deploy-user'ın home'una yükle (/tmp world-readable, home izole)
+    scp -P ${{ secrets.SERVER_PORT }} \
+      -o StrictHostKeyChecking=accept-new \
+      app.tar ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:~/
+
+    ssh -p ${{ secrets.SERVER_PORT }} \
+      ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} <<'ENDSSH'
+      set -e
+      docker load -i ~/app.tar
+      docker stop app 2>/dev/null || true
+      docker rm app 2>/dev/null || true
+      docker run -d --name app --network proxy --restart unless-stopped app:latest
+      rm -f ~/app.tar
+      docker image prune -f
+    ENDSSH
+```
+
+`deploy-user` docker grubunda olduğu için tüm `docker` komutları sudo'suz çalışır. Sudoers sadece debug için açık (`sudo journalctl`, `sudo ufw status`).
+
+---
+
 ## 📋 Gereksinimler
 
 - Hetzner Cloud sunucusu (test edilen: CX22, CPX52 ve üstü)
@@ -173,7 +220,8 @@ ssh -p 3131 root@<SERVER_IP>
 ```
 .
 ├── setup.sh                    # Mevcut sunucuda çalıştırılan kurulum scripti
-└── README.md                   # Bu dosya
+├── README.md                   # Bu dosya
+└── CLAUDE.md                   # Claude Code için proje rehberi (standartlar, adımlar, politikalar)
 ```
 
 ---

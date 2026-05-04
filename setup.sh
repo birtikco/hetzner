@@ -4,9 +4,11 @@
 # ║                                                                          ║
 # ║  Kullanım:                                                               ║
 # ║    1) İnteraktif:  ./setup.sh                                            ║
-# ║    2) Argüman:     ./setup.sh "ssh-ed25519 AAA... user@host"             ║
-# ║    3) Env var:     SSH_KEY="ssh-ed25519 AAA..." ./setup.sh               ║
+# ║    2) Argüman:     ./setup.sh "ssh-ed25519 ROOT..." "ssh-ed25519 DEPLOY..." ║
+# ║    3) Env var:     SSH_KEY="..." DEPLOY_KEY="..." ./setup.sh             ║
 # ║    4) Tek satır:   curl -fsSL <url> | SSH_KEY="..." bash                 ║
+# ║                                                                          ║
+# ║  DEPLOY_KEY opsiyonel — verilmezse SSH_KEY (root key) fallback kullanılır.║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 set -e
@@ -26,7 +28,7 @@ DIM='\033[2m'
 NC='\033[0m'
 
 # ─── Sayaçlar ────────────────────────────────────────────────────────────────
-TOTAL_STEPS=9
+TOTAL_STEPS=10
 CURRENT_STEP=0
 START_TIME=$(date +%s)
 
@@ -115,6 +117,23 @@ if ! echo "$SSH_KEY" | grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+|ss
 fi
 
 
+# ─── DEPLOY KEY KAYNAĞINI BELİRLE ────────────────────────────────────────────
+# Sıralı kontrol: 1) 2. argüman → 2) DEPLOY_KEY env var → 3) SSH_KEY fallback
+if [ -n "$2" ]; then
+  DEPLOY_KEY="$2"
+  info "Deploy key 2. argümandan alındı"
+elif [ -n "$DEPLOY_KEY" ]; then
+  info "Deploy key ortam değişkeninden alındı"
+else
+  DEPLOY_KEY="$SSH_KEY"
+  info "Deploy key tanımlanmadı → root SSH key fallback kullanılacak"
+fi
+
+if ! echo "$DEPLOY_KEY" | grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+|ssh-dss) [A-Za-z0-9+/=]+'; then
+  err "Geçersiz DEPLOY_KEY formatı. Beklenen: 'ssh-ed25519 AAAA... user@host'"
+fi
+
+
 # ─── 1. SSH ANAHTARI ─────────────────────────────────────────────────────────
 step_header "SSH Anahtarı"
 mkdir -p /root/.ssh
@@ -144,17 +163,74 @@ run_with_spinner "Paketler kuruluyor" apt-get install -y $PACKAGES
 step_done
 
 
-# ─── 4. SSH SERTLEŞTİRME ─────────────────────────────────────────────────────
+# ─── 4. DEPLOY USER (CI/CD) ──────────────────────────────────────────────────
+step_header "Deploy User (CI/CD)"
+
+DEPLOY_USERNAME="deploy-user"
+DEPLOY_HOME="/home/${DEPLOY_USERNAME}"
+
+if id "$DEPLOY_USERNAME" &>/dev/null; then
+  warn "Kullanıcı ${CYAN}${DEPLOY_USERNAME}${NC} zaten var, oluşturma atlandı"
+else
+  useradd --create-home --shell /bin/bash "$DEPLOY_USERNAME"
+  log "Kullanıcı oluşturuldu: ${CYAN}${DEPLOY_USERNAME}${NC}"
+fi
+
+passwd -l "$DEPLOY_USERNAME" >/dev/null 2>&1
+log "Şifre girişi kilitlendi (sadece SSH key)"
+
+install -d -m 700 -o "$DEPLOY_USERNAME" -g "$DEPLOY_USERNAME" "${DEPLOY_HOME}/.ssh"
+AUTH_KEYS="${DEPLOY_HOME}/.ssh/authorized_keys"
+touch "$AUTH_KEYS"
+if ! grep -qF "$DEPLOY_KEY" "$AUTH_KEYS" 2>/dev/null; then
+  echo "$DEPLOY_KEY" >> "$AUTH_KEYS"
+  log "Deploy key eklendi: ${CYAN}$(echo "$DEPLOY_KEY" | awk '{print $3}')${NC}"
+else
+  info "Deploy key zaten authorized_keys'te"
+fi
+chown "$DEPLOY_USERNAME:$DEPLOY_USERNAME" "$AUTH_KEYS"
+chmod 600 "$AUTH_KEYS"
+
+SUDOERS_FILE="/etc/sudoers.d/${DEPLOY_USERNAME}"
+cat > "$SUDOERS_FILE" << EOF
+# CI/CD deploy-user — minimum yetki
+# Docker grubu üyeliği zaten docker komutlarına erişim sağlıyor.
+# Sudo sadece debug/diagnostic için.
+Cmnd_Alias DEPLOY_LOG = /usr/bin/journalctl, /usr/bin/journalctl *
+Cmnd_Alias DEPLOY_FW  = /usr/sbin/ufw status, /usr/sbin/ufw status verbose
+
+${DEPLOY_USERNAME} ALL=(ALL) NOPASSWD: DEPLOY_LOG, DEPLOY_FW
+Defaults:${DEPLOY_USERNAME} !requiretty
+EOF
+chmod 0440 "$SUDOERS_FILE"
+
+if ! visudo -c -f "$SUDOERS_FILE" >/dev/null 2>&1; then
+  rm -f "$SUDOERS_FILE"
+  err "Sudoers dosyası geçersiz, geri alındı"
+fi
+log "Sudoers: ${CYAN}/etc/sudoers.d/${DEPLOY_USERNAME}${NC} (minimum)"
+step_done
+
+
+# ─── 5. SSH SERTLEŞTİRME ─────────────────────────────────────────────────────
 step_header "SSH Sertleştirme"
 sed -i 's/^#Port 22/Port 3131/' /etc/ssh/sshd_config
 sed -i 's/^Port 22/Port 3131/' /etc/ssh/sshd_config
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sed -i 's/^#\?MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config
+
+if grep -qE '^AllowUsers' /etc/ssh/sshd_config; then
+  sed -i "s/^AllowUsers.*/AllowUsers root ${DEPLOY_USERNAME}/" /etc/ssh/sshd_config
+else
+  echo "AllowUsers root ${DEPLOY_USERNAME}" >> /etc/ssh/sshd_config
+fi
+
 log "Port: ${CYAN}22 → 3131${NC}"
 log "Şifreyle giriş: ${RED}kapalı${NC}"
 log "Root: ${YELLOW}prohibit-password${NC} (sadece SSH key)"
 log "MaxAuthTries: ${CYAN}3${NC}"
+log "AllowUsers: ${CYAN}root ${DEPLOY_USERNAME}${NC}"
 
 mkdir -p /etc/systemd/system/ssh.socket.d
 cat > /etc/systemd/system/ssh.socket.d/override.conf << 'EOF'
@@ -170,7 +246,7 @@ log "ssh.socket override yüklendi, servis yeniden başlatıldı"
 step_done
 
 
-# ─── 5. FAIL2BAN ─────────────────────────────────────────────────────────────
+# ─── 6. FAIL2BAN ─────────────────────────────────────────────────────────────
 step_header "fail2ban (Brute Force Koruması)"
 cat > /etc/fail2ban/jail.local << 'EOF'
 [DEFAULT]
@@ -195,7 +271,7 @@ log "Tekrar suçluya: ${YELLOW}katlanarak artar${NC} (max 1 hafta)"
 step_done
 
 
-# ─── 6. UFW ──────────────────────────────────────────────────────────────────
+# ─── 7. UFW ──────────────────────────────────────────────────────────────────
 step_header "UFW Güvenlik Duvarı"
 ufw --force reset >/dev/null 2>&1
 ufw default deny incoming >/dev/null 2>&1
@@ -216,7 +292,7 @@ echo -e "      ${CYAN}8000${NC}  ${DIM}Portainer Edge${NC}"
 step_done
 
 
-# ─── 7. DOCKER ───────────────────────────────────────────────────────────────
+# ─── 8. DOCKER ───────────────────────────────────────────────────────────────
 step_header "Docker"
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
@@ -230,10 +306,13 @@ run_with_spinner "Docker CE + plugins kuruluyor" \
 systemctl enable --now docker >/dev/null 2>&1
 log "Sürüm: ${CYAN}$(docker --version | awk '{print $3}' | tr -d ',')${NC}"
 log "Compose: ${CYAN}$(docker compose version --short)${NC}"
+
+usermod -aG docker "$DEPLOY_USERNAME"
+log "${CYAN}${DEPLOY_USERNAME}${NC} docker grubuna eklendi"
 step_done
 
 
-# ─── 8. PORTAINER ────────────────────────────────────────────────────────────
+# ─── 9. PORTAINER ────────────────────────────────────────────────────────────
 step_header "Portainer"
 docker network create proxy >/dev/null 2>&1 || warn "proxy ağı zaten var"
 log "Docker ağı: ${CYAN}proxy${NC}"
@@ -252,7 +331,7 @@ run_with_spinner "Portainer container başlatılıyor" \
 step_done
 
 
-# ─── 9. NGINX PROXY MANAGER ──────────────────────────────────────────────────
+# ─── 10. NGINX PROXY MANAGER ─────────────────────────────────────────────────
 step_header "Nginx Proxy Manager"
 mkdir -p /root/nginx-proxy-manager
 cat > /root/nginx-proxy-manager/docker-compose.yml << 'EOF'
@@ -311,9 +390,10 @@ echo ""
 
 echo -e "   ${BOLD}${WHITE}Servisler${NC}"
 echo -e "   ${GRAY}────────────────────────────────────────────${NC}"
-echo -e "   ${MAGENTA}❯${NC} SSH        ${DIM}→${NC} ${YELLOW}ssh -p 3131 root@${SERVER_IP}${NC}"
-echo -e "   ${MAGENTA}❯${NC} Portainer  ${DIM}→${NC} ${YELLOW}https://${SERVER_IP}:9443${NC}"
-echo -e "   ${MAGENTA}❯${NC} NPM Admin  ${DIM}→${NC} ${YELLOW}http://${SERVER_IP}:81${NC}"
+echo -e "   ${MAGENTA}❯${NC} SSH (root)   ${DIM}→${NC} ${YELLOW}ssh -p 3131 root@${SERVER_IP}${NC}"
+echo -e "   ${MAGENTA}❯${NC} SSH (deploy) ${DIM}→${NC} ${YELLOW}ssh -p 3131 ${DEPLOY_USERNAME}@${SERVER_IP}${NC}"
+echo -e "   ${MAGENTA}❯${NC} Portainer    ${DIM}→${NC} ${YELLOW}https://${SERVER_IP}:9443${NC}"
+echo -e "   ${MAGENTA}❯${NC} NPM Admin    ${DIM}→${NC} ${YELLOW}http://${SERVER_IP}:81${NC}"
 echo ""
 
 echo -e "   ${BOLD}${WHITE}Sonraki Adımlar${NC}"
@@ -322,6 +402,11 @@ echo -e "   ${BLUE}1.${NC} Yerel makinende: ${DIM}ssh-keygen -R ${SERVER_IP}${NC
 echo -e "   ${BLUE}2.${NC} Test: ${DIM}ssh -p 3131 root@${SERVER_IP}${NC}"
 echo -e "   ${BLUE}3.${NC} Portainer'da admin hesabı oluştur"
 echo -e "   ${BLUE}4.${NC} NPM'de DNS bağlı domain için proxy host ekle"
+echo -e "   ${BLUE}5.${NC} GitHub Actions secrets:"
+echo -e "      ${GRAY}DEPLOY_SSH_KEY → private key (id_ed25519_deploy)${NC}"
+echo -e "      ${GRAY}SERVER_HOST    → ${SERVER_IP}${NC}"
+echo -e "      ${GRAY}SERVER_USER    → ${DEPLOY_USERNAME}${NC}"
+echo -e "      ${GRAY}SERVER_PORT    → 3131${NC}"
 echo ""
 
 echo -e "   ${GRAY}─────────────────────────────────────────────${NC}"

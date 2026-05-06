@@ -126,6 +126,7 @@ docker run -d \
   -p 8080:3000 \
   --restart always \
   proje-adi:latest
+docker network connect bridge proje-adi
 
 rm ~/proje.tar
 ```
@@ -229,10 +230,10 @@ jobs:
           docker run -d \
             --name app \
             --network proxy \
-            --network bridge \
             -p 8080:3000 \
             --restart always \
             app:latest
+          docker network connect bridge app
           rm -f ~/app.tar
           docker image prune -f
           ENDSSH
@@ -253,9 +254,10 @@ jobs:
 
 ### Network ve Port Konfigürasyonu
 
-- Container'ın **mutlaka** `--network proxy` ve `--network bridge` ağlarında olması gerekir
+- Container'ın `proxy` ve `bridge` ağlarında olması gerekir
   - `proxy` — Nginx Proxy Manager ile haberleşme
   - `bridge` — Container'ın dış erişimi
+- `docker run` ile aynı anda iki network verilemez — önce `--network proxy` ile başlat, sonra `docker network connect bridge <container-adı>` ile bridge'i ekle
 - Dış portlar workflow'da manuel belirtilir: `-p <dış-port>:<iç-port>`
 - Smoke test'e gerek yok çünkü tüm trafik Nginx Proxy Manager üzerinden geçer (80/443)
 

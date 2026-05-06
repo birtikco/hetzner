@@ -231,7 +231,7 @@ jobs:
             --network proxy \
             --network bridge \
             -p 8080:3000 \
-            --restart unless-stopped \
+            --restart always \
             app:latest
           rm -f ~/app.tar
           docker image prune -f

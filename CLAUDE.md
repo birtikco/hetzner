@@ -30,9 +30,32 @@ Script'te şu logging fonksiyonları kullanılır:
 - `err <mesaj>` — hata ve exit (kırmızı ✗)
 - `step_header <başlık>` — adım başlığı (mavi kutu)
 - `step_done` — adım tamamlanması (yeşil)
-- `run_with_spinner <mesaj> <komut...>` — spinner ile arka planda komut çalıştır
+- `run_with_spinner <mesaj> <komut...>` — spinner ile arka planda komut çalıştır; başarıda yeşil ✓, başarısızlıkta kırmızı ✗ basar ve `return 1` ile `set -e`'yi tetikler
+- `changed <mesaj>` — bir şey değiştirildi: `CHANGES` sayacını artırır, `log` basar
+- `skipped <mesaj>` — onay verilmedi, atlandı: `SKIPPED` sayacını artırır, `warn` basar
+- `confirm <soru>` — kesinti yaratan işlem öncesi sorar. `--yes` verilmişse evet; terminal yoksa (`curl | bash`, CI, nohup) hayır. Cevabı `/dev/tty`'den okur, o yüzden stdin heredoc/pipe olsa bile çalışır
+- `write_managed <hedef> <mod> <etiket>` — istenen içeriği stdin'den alır; dosya yoksa yazar, aynıysa dokunmaz, farklıysa `confirm` ile sorar
 
 Yeni komutlar eklerken bu fonksiyonları kullan, standart `echo` kullanma.
+
+**Paket listesi zorunlu/opsiyonel ayrılır.** `apt-get install` listedeki tek bir paket
+bulunamazsa hiçbirini kurmaz ve non-zero döner — `set -e` altında bu, kurulumun tamamen
+durması demektir. Sertleştirme için gereken paketler (`ufw`, `fail2ban`, `curl`, `gnupg` …)
+`PKG_REQUIRED` içinde ve eksikse script **durmalı**. Konfor paketleri (`htop`, `nano`,
+`cmatrix` …) `PKG_OPTIONAL` içinde; `apt-cache show` ile süzülür, olmayan atlanır ve uyarı
+basılır. Yeni paket eklerken hangi gruba ait olduğuna karar ver — konfor paketini zorunlu
+listeye koymak, o paket bir dağıtımdan kaldırıldığında kurulumu kilitler (`neofetch`
+Ubuntu 26.04'te tam bunu yaptı).
+
+**Süzme `apt-get update`'e bağımlıdır.** `apt-cache show` boş bir apt cache'te her paket
+için "yok" der — taze imajda `update` çalışmadan önce `neofetch` bile bulunamaz. Paket
+adımı bu yüzden sistem güncellemesinden *sonra* gelmek zorunda; 3. adımı yukarı taşıma,
+yoksa mevcut paketler sessizce atlanır.
+
+**Hata yutma yasağı:** Bir adımı `>/dev/null 2>&1` ile susturup ardından koşulsuz başarı
+mesajı basma. Ya `run_with_spinner` kullan, ya da komutun gerçek çıktısını göster. Sessiz
+başarısızlık bu scriptte en pahalı hata sınıfı — kullanıcı sunucunun sertleştirildiğini
+sanarak devam eder.
 
 ### Renk Kodları
 Tanımlanmış renkler (başında tanımlanmış): `RED`, `GREEN`, `YELLOW`, `BLUE`, `CYAN`, `MAGENTA`, `WHITE`, `GRAY`, `BOLD`, `DIM`, `NC` (sıfırla)
@@ -45,14 +68,14 @@ Script 10 adımda çalışır:
 
 1. **SSH Anahtarı** — authorized_keys'e genel anahtar ekle (root)
 2. **Sistem Güncellemesi** — apt update + upgrade
-3. **Paketler** — temel sistem paketlerini yükle
+3. **Paketler** — zorunlu paketler (biri eksikse script durur) + opsiyonel paketler (eksik olan süzülür, uyarı basılır)
 4. **Deploy User (CI/CD)** — `deploy-user` oluştur, SSH key ekle, sudoers minimum yetki
-5. **SSH Sertleştirme** — port 3131, şifre devre dışı, MaxAuthTries 3, AllowUsers `root deploy-user`
+5. **SSH Sertleştirme** — `99-hardening.conf` drop-in'i yaz, çakışanları yorumla, `sshd -T` ile doğrula
 6. **fail2ban** — brute force koruması (3 deneme → 24 saat ban, katlanarak artar)
-7. **UFW** — güvenlik duvarı (default deny incoming, açık portlar: 3131, 80, 443, 9443, 8000)
-8. **Docker** — Docker CE + Compose plugin + Buildx plugin, `deploy-user` docker grubuna eklenir
-9. **Portainer** — Docker yönetim arayüzü (container + volume oluştur, proxy ağına bağla)
-10. **Nginx Proxy Manager** — docker-compose.yml ile NPM kurulumu
+7. **UFW** — güvenlik duvarı (default deny incoming, açık portlar: 3131, 80, 443)
+8. **Docker** — Docker CE + Compose plugin + Buildx plugin, `deploy-user` docker grubuna eklenir. Depo kod adı ve mimari sabit değil: `UBUNTU_CODENAME` ve `dpkg --print-architecture` ile türetilir, depo yoksa script durur
+9. **Portainer** — `/root/portainer/docker-compose.yml`, `127.0.0.1:9443` (internete kapalı). Eski `docker run` kurulumları onay alınarak compose'a taşınır
+10. **Nginx Proxy Manager** — docker-compose.yml, 80/443 dışa açık, panel `127.0.0.1:81`
 
 ## SSH Key Kaynağı
 
@@ -81,16 +104,52 @@ Key formatı doğrulaması regex ile yapılır: `ssh-ed25519`, `ssh-rsa`, `ecdsa
 
 ## Önemli Notlar
 
-**Idempotent Değil:** Script aynı sunucuda iki kez çalıştırılırsa:
-- UFW kuralları sıfırlanır
-- fail2ban config'i sıfırlanır
-- Root SSH key'leri yığılır (append mode)
+## Tekrar Çalıştırılabilirlik (converge)
 
-**Deploy User adımı idempotent yazılmıştır:** İkinci çalıştırmada `deploy-user` zaten varsa atlanır, deploy key zaten authorized_keys'teyse tekrar eklenmez.
+Script tekrar çalıştırılabilir: eksik olanı kurar, zaten doğru olana dokunmaz, kullanıcının
+elle değiştirmiş olabileceği dosyalara yazmadan önce sorar. Bir sunucunun hâlâ istenen halde
+olup olmadığını görmek için tekrar çalıştırmak güvenli bir işlemdir.
+
+**Üç davranış sınıfı — yeni adım eklerken hangisine girdiğine karar ver:**
+
+| Sınıf | Örnek | Davranış |
+| --- | --- | --- |
+| Koşulsuz uygulanır | SSH drop-in, UFW izinleri, apt paketleri, `usermod -aG` | Her koşuda istenen hale getirilir |
+| Varsa eklenmez | root ve deploy SSH key'leri | `grep -qF` ile kontrol, yoksa eklenir |
+| Sorulur | `jail.local`, iki compose dosyası | `write_managed`: yoksa yaz, aynıysa geç, farklıysa sor |
+
+Kullanıcının düzenleyebileceği bir dosya yazıyorsan **`cat >` ile doğrudan yazma**, `write_managed`
+kullan. Aksi halde kullanıcının bilinçli değişikliği sessizce geri alınır — özet ekranı panel
+portlarını kaldırmayı önerirken sonraki koşunun onları geri yazması tam bu hataydı.
+
+**SSH sertleştirmesi neden sorulmuyor:** Güvenlik ayarında drift kabul edilmiyor.
+`99-hardening.conf` koşulsuz yazılır, çakışan direktifler yorumlanır ve sonuç `sshd -T` ile
+doğrulanır; uymuyorsa script durur. Bu istisnayı genişletme.
+
+**Yıkıcı işlem = onay.** Konteyner yeniden yaratma gibi kesinti yaratan adımlar `confirm` ile
+sorulur. Etkileşimli terminal yoksa sessizce atlanır ve `SKIPPED` sayacına yazılır; `--yes`
+ile zorlanır. Bir adımın kesinti yaratıp yaratmadığından emin değilsen sor — sessizce
+uygulamak, üretimde kazara çalıştırıldığında geri alınamaz.
+
+**Sayaçlar:** `changed`/`skipped` helper'ları `CHANGES` ve `SKIPPED` sayaçlarını besler,
+ikisi de özet ekranında raporlanır. `CHANGES=0` ise banner "SUNUCU ZATEN İSTENEN DURUMDA"
+olur — kullanıcı tek bakışta hiçbir şeyin değişmediğini görür.
+
+**UFW'de reset yok:** `ufw allow` zaten idempotent. `ufw --force reset` çağırmak, kullanıcının
+sonradan eklediği kuralları silerdi; o yüzden kaldırıldı, geri ekleme.
 
 **SSH Port Değişimi:** Kurulum sonrası SSH portu 22'den 3131'e taşınır. Yerel `~/.ssh/config` güncellenmesi gerekir.
 
 **Şifre Girişi Kapalı:** PasswordAuthentication no ayarı yapıldığı için SSH key zorunludur.
+
+**SSH ayarları drop-in ile yazılır:** `/etc/ssh/sshd_config.d/99-hardening.conf`. sshd bir
+direktifin **ilk** gördüğü değeri kullanır — alfabetik sıra değil, okuma sırası kazanır — ve
+`Include` satırı `sshd_config`'in en başındadır. Bu yüzden cloud imajlarıyla gelen
+`50-cloud-init.conf` (içinde sık sık `PasswordAuthentication yes` olur) drop-in'imizi
+gölgeleyebilir. Script bunu önlemek için çakışan direktifleri hem ana dosyadan hem diğer
+drop-in'lerden yorum satırına alır, sonra `sshd -T` çıktısını beklenen değerlerle karşılaştırır
+ve **uymuyorsa durur**. Bu adımı gevşetme: sessizce sertleştirilmemiş bir sunucu, hiç
+sertleştirilmemiş olandan daha tehlikelidir çünkü kullanıcı korunduğunu sanır.
 
 ## Docker Containerları Dağıtımı (Post-Setup)
 
@@ -122,10 +181,27 @@ networks:
     external: true
 ```
 
+**Port yayınlama yasağı:** Uygulama container'larına `-p` verme. NPM `proxy` ağı üzerinden
+container'a **adıyla** ulaşır, yayınlanmış porta ihtiyaç yoktur. Yayınlanan her port siteyi
+ikinci bir yoldan — SSL'siz, access list'siz — internete açar, ve UFW bunu durdurmaz:
+Docker'ın `0.0.0.0` bağlamaları `INPUT` zincirine hiç uğramaz. Bir servise host üzerinden
+erişmek gerçekten gerekiyorsa `-p 172.17.0.1:PORT:PORT` kullan.
+
+**Ağ:** Container yalnız `proxy` ağında olmalı. `bridge` ağına ayrıca bağlanmak
+**gerekmez** — `proxy` kullanıcı tanımlı bir bridge ağı ve NAT'lı outbound verir
+(14.08.2026'da taze kurulumda ölçüldü). `docker network connect bridge` adımını geri ekleme.
+
 **Nginx Proxy Manager'da proxy host ekle:**
 - **Forward Hostname:** container ismi (örn: `app`)
-- **Forward Port:** container'ın iç portu
+- **Forward Port:** container'ın **iç** portu (yayınlanmış dış port değil)
 - **SSL:** Let's Encrypt sertifikası iste
+- Portainer'ın proxy host'unda scheme **HTTPS** olmalı (kendi TLS'ini konuşur)
+
+**Panellere erişim:** Portainer ve NPM yalnızca loopback'te dinler. SSH tüneli:
+```bash
+ssh -p 3131 -L 8181:127.0.0.1:81 root@<IP>      # NPM
+ssh -p 3131 -L 9443:127.0.0.1:9443 root@<IP>    # Portainer
+```
 
 ## Dosya Yapısı
 

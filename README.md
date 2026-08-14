@@ -118,13 +118,15 @@ Proxy host'lar çalıştıktan sonra:
 ```bash
 # NPM: compose'dan 127.0.0.1:81:81 satırını sil
 nano /root/nginx-proxy-manager/docker-compose.yml
-cd /root/nginx-proxy-manager && docker compose up -d
+docker compose -f /root/nginx-proxy-manager/docker-compose.yml up -d
 
-# Portainer: -p vermeden yeniden yarat
-# Portainer: compose'dan 127.0.0.1:9443:9443 satırını sil
+# Portainer: ports: bloğunun TAMAMINI sil (altında tek satır var)
 nano /root/portainer/docker-compose.yml
 docker compose -f /root/portainer/docker-compose.yml up -d
 ```
+
+> Portainer'da yalnızca port satırını silip `ports:` anahtarını bırakırsan compose
+> `services.portainer.ports must be a array` deyip çalışmaz — anahtarı da sil.
 
 > `setup.sh` tekrar çalıştırılırsa bu dosyaların değiştiğini görür ve **üzerine
 > yazmadan önce sorar.** Terminal etkileşimli değilse (`curl | bash`, CI) dosyaya
@@ -153,6 +155,10 @@ SSH_KEY="ssh-ed25519 AAAA..." ./setup.sh
 
 `--yes` (kısaca `-y`) yalnızca **onay sorularını** atlar; kesinti yaratan adımları
 (konteyner yeniden yaratma, elle değiştirilmiş dosyanın üzerine yazma) sormadan uygular.
+
+**Çıkış kodları:** `0` sunucu istenen durumda · `2` sapma var ama uygulanmadı (onay
+verilmedi ya da terminal etkileşimli değildi) · `1` hata. CI'da `2`'yi "kontrol et"
+olarak ele al — kurulum bozulmadı, ama sunucu tam converge olmadı.
 
 ---
 

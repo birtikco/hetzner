@@ -37,6 +37,7 @@ START_TIME=$(date +%s)
 CHANGES=0
 SKIPPED=0
 ASSUME_YES=0
+PANELS_VERIFIED=1
 
 # ─── Yardımcı fonksiyonlar ───────────────────────────────────────────────────
 spinner() {
@@ -44,13 +45,14 @@ spinner() {
   local message=$2
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
-  tput civis 2>/dev/null
+  # TERM tanımsızken tput non-zero döner; set -e altında bu scripti öldürürdü.
+  tput civis 2>/dev/null || true
   while kill -0 "$pid" 2>/dev/null; do
-    printf "\r  ${CYAN}${frames[i]}${NC} ${message}"
+    printf "\r  ${CYAN}${frames[i]}${NC} %s" "$message"
     i=$(( (i+1) % 10 ))
     sleep 0.1
   done
-  tput cnorm 2>/dev/null
+  tput cnorm 2>/dev/null || true
 }
 
 run_with_spinner() {
@@ -60,9 +62,9 @@ run_with_spinner() {
   local pid=$!
   spinner "$pid" "$message"
   if wait "$pid"; then
-    printf "\r  ${GREEN}✓${NC} ${message}\n"
+    printf "\r  ${GREEN}✓${NC} %s\n" "$message"
   else
-    printf "\r  ${RED}✗${NC} ${message}\n"
+    printf "\r  ${RED}✗${NC} %s\n" "$message"
     return 1
   fi
 }
@@ -91,37 +93,47 @@ skipped() { SKIPPED=$((SKIPPED+1)); warn "$1"; }
 # Kesinti yaratan ya da kullanıcının elle değiştirmiş olabileceği bir şeye
 # dokunmadan önce sorulur. Cevap terminalden okunur — stdin heredoc ya da pipe
 # olabilir. Terminal yoksa (curl | bash, CI, nohup) sessizce hayır döner.
+# Cevap terminalden okunur — stdin heredoc ya da pipe olabilir. stdout terminal
+# değilse (CI, nohup, log'a yönlendirme) sorulmaz: nohup'ta /dev/tty açılabilir
+# ama okumak SIGTTIN ile süreci durdururdu.
 confirm() {
   if [ "$ASSUME_YES" -eq 1 ]; then return 0; fi
+  [ -t 1 ] || return 1
   ( : < /dev/tty ) 2>/dev/null || return 1
   local answer
-  read -r -p "  $(echo -e "${YELLOW}?${NC}") $1 (y/N): " answer < /dev/tty
+  read -r -p "$(echo -e "  ${YELLOW}?${NC} $1 (y/N): ")" answer < /dev/tty
   [[ "$answer" =~ ^[Yy]$ ]]
 }
 
 # İstenen içerik stdin'den okunur. Dosya yoksa yazılır, aynıysa dokunulmaz,
 # farklıysa kullanıcı elle değiştirmiş olabilir diye sorulur.
+# Dönüş: 0 = dosya istenen halde, 1 = korundu (sapma sürüyor).
 write_managed() {
   local target=$1 mode=$2 label=$3
-  local tmp
+  local tmp rc=0
   tmp=$(mktemp)
+  trap 'rm -f "$tmp"' RETURN
   cat > "$tmp"
   if [ ! -f "$target" ]; then
     install -m "$mode" "$tmp" "$target"
     changed "${label} oluşturuldu"
   elif cmp -s "$tmp" "$target"; then
+    chmod "$mode" "$target"
     info "${label} zaten istenen halde"
   elif confirm "${label} elle değiştirilmiş — üzerine yazılsın mı?"; then
     install -m "$mode" "$tmp" "$target"
     changed "${label} güncellendi"
   else
     skipped "${label} korundu ${DIM}(--yes ile üzerine yazılır)${NC}"
+    rc=1
   fi
-  rm -f "$tmp"
+  return $rc
 }
 
 # ─── ASCII Banner ────────────────────────────────────────────────────────────
-clear
+# TERM tanımsızken clear "TERM environment variable not set" deyip 1 döner;
+# set -e altında script daha ilk satırda ölürdü.
+clear 2>/dev/null || true
 echo ""
 echo -e "${MAGENTA}"
 cat << "EOF"
@@ -170,6 +182,10 @@ else
   err "SSH key verilmedi ve terminal etkileşimli değil.\n     Örnek: ${CYAN}curl -fsSL <url> | SSH_KEY=\"ssh-ed25519 AAAA...\" bash${NC}"
 fi
 
+# Baş/son boşluk ve satır sonu temizlenir. Newline taşıyan bir değer (dosyadan
+# okunmuş secret) grep -F'te boş desene dönüşür ve her satırla eşleşirdi.
+SSH_KEY=$(printf '%s' "$SSH_KEY" | tr -d '\r\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
 # Format doğrulaması
 if ! echo "$SSH_KEY" | grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+|ssh-dss) [A-Za-z0-9+/=]+'; then
   err "Geçersiz SSH public key formatı. Beklenen: 'ssh-ed25519 AAAA... user@host'"
@@ -188,6 +204,8 @@ else
   info "Deploy key tanımlanmadı → root SSH key fallback kullanılacak"
 fi
 
+DEPLOY_KEY=$(printf '%s' "$DEPLOY_KEY" | tr -d '\r\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
 if ! echo "$DEPLOY_KEY" | grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+|ssh-dss) [A-Za-z0-9+/=]+'; then
   err "Geçersiz DEPLOY_KEY formatı. Beklenen: 'ssh-ed25519 AAAA... user@host'"
 fi
@@ -201,7 +219,10 @@ ROOT_AUTH_KEYS=/root/.ssh/authorized_keys
 touch "$ROOT_AUTH_KEYS"
 chmod 600 "$ROOT_AUTH_KEYS"
 
-if grep -qF "$SSH_KEY" "$ROOT_AUTH_KEYS"; then
+# -x zorunlu: -F tek başına alt dize eşler, yani 'from="10/8" ssh-ed25519 AAA...'
+# gibi kısıtlı bir satır key'i içerdiğinde script onu "zaten var" sayıp eklemez
+# ve adım 5'ten sonra sunucuya girilemez.
+if grep -qxF "$SSH_KEY" "$ROOT_AUTH_KEYS"; then
   info "Root key zaten authorized_keys'te"
 else
   echo "$SSH_KEY" >> "$ROOT_AUTH_KEYS"
@@ -272,9 +293,9 @@ log "Şifre girişi kilitlendi (sadece SSH key)"
 install -d -m 700 -o "$DEPLOY_USERNAME" -g "$DEPLOY_USERNAME" "${DEPLOY_HOME}/.ssh"
 AUTH_KEYS="${DEPLOY_HOME}/.ssh/authorized_keys"
 touch "$AUTH_KEYS"
-if ! grep -qF "$DEPLOY_KEY" "$AUTH_KEYS" 2>/dev/null; then
+if ! grep -qxF "$DEPLOY_KEY" "$AUTH_KEYS" 2>/dev/null; then
   echo "$DEPLOY_KEY" >> "$AUTH_KEYS"
-  log "Deploy key eklendi: ${CYAN}$(echo "$DEPLOY_KEY" | awk '{print $3}')${NC}"
+  changed "Deploy key eklendi: ${CYAN}$(echo "$DEPLOY_KEY" | awk '{print $3}')${NC}"
 else
   info "Deploy key zaten authorized_keys'te"
 fi
@@ -316,7 +337,10 @@ mkdir -p /etc/ssh/sshd_config.d
 grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config \
   || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
 shopt -s nullglob
-sed -i -E "s/^[[:space:]]*(${SSHD_KEYS})[[:space:]]/#&/" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf
+# I bayrağı ve '=' şart: sshd anahtar kelimeleri büyük/küçük harf duyarsızdır ve
+# 'PasswordAuthentication=yes' de geçerlidir. İkisi de kaçarsa drop-in gölgelenir
+# ve doğrulama her koşuda scripti durdurur.
+sed -i -E "s/^[[:space:]]*(${SSHD_KEYS})([[:space:]]|=)/#&/I" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf
 shopt -u nullglob
 
 cat > "$SSHD_DROPIN" << CONF
@@ -369,7 +393,12 @@ ListenStream=[::]:3131
 EOF
 
 systemctl daemon-reload >/dev/null 2>&1
-systemctl restart ssh.socket ssh >/dev/null 2>&1
+# Susturulursa set -e burada öldürür ve aşağıdaki kilitlenme uyarısına hiç
+# ulaşılmaz — oysa bu adımın en değerli çıktısı o uyarı.
+if ! SSH_RESTART_OUT=$(systemctl restart ssh.socket ssh 2>&1); then
+  echo "$SSH_RESTART_OUT" | sed 's/^/      /'
+  err "SSH servisi yeniden başlatılamadı — açık oturumunu KAPATMA"
+fi
 sleep 1
 [[ $(ss -lntH) == *":3131 "* ]] \
   || err "SSH 3131'de dinlemiyor — açık oturumunu KAPATMA, 'systemctl status ssh.socket' ile bak"
@@ -379,7 +408,8 @@ step_done
 
 # ─── 6. FAIL2BAN ─────────────────────────────────────────────────────────────
 step_header "fail2ban (Brute Force Koruması)"
-write_managed /etc/fail2ban/jail.local 644 "jail.local" << 'EOF'
+F2B_MANAGED=1
+write_managed /etc/fail2ban/jail.local 644 "jail.local" << 'EOF' || F2B_MANAGED=0
 [DEFAULT]
 bantime         = 24h
 findtime        = 10m
@@ -396,10 +426,21 @@ logpath  = %(sshd_log)s
 backend  = %(sshd_backend)s
 maxretry = 3
 EOF
-systemctl enable --now fail2ban >/dev/null 2>&1
+if ! F2B_OUT=$(systemctl enable --now fail2ban 2>&1); then
+  echo "$F2B_OUT" | sed 's/^/      /'
+  err "fail2ban başlatılamadı"
+fi
 systemctl reload fail2ban >/dev/null 2>&1 || true
-log "Kural: ${CYAN}3 deneme${NC} → ${RED}24 saat ban${NC}"
-log "Tekrar suçluya: ${YELLOW}katlanarak artar${NC} (max 1 hafta)"
+
+# Kural metni yalnızca dosya gerçekten yazıldıysa doğrudur; korunduysa ekranda
+# yazan politika ile sunucuda geçerli olan farklıdır.
+if [ "$F2B_MANAGED" -eq 1 ]; then
+  log "Kural: ${CYAN}3 deneme${NC} → ${RED}24 saat ban${NC}"
+  log "Tekrar suçluya: ${YELLOW}katlanarak artar${NC} (max 1 hafta)"
+else
+  warn "jail.local korundu — ${RED}yukarıdaki kural bu sunucuda geçerli değil${NC}"
+  warn "Geçerli politika için: ${CYAN}cat /etc/fail2ban/jail.local${NC}"
+fi
 step_done
 
 
@@ -459,14 +500,22 @@ step_done
 
 # ─── 9. PORTAINER ────────────────────────────────────────────────────────────
 step_header "Portainer"
-docker network create proxy >/dev/null 2>&1 || info "proxy ağı zaten var"
+if ! NET_OUT=$(docker network create proxy 2>&1); then
+  if echo "$NET_OUT" | grep -q 'already exists'; then
+    info "proxy ağı zaten var"
+  else
+    echo "$NET_OUT" | sed 's/^/      /'
+    err "proxy ağı oluşturulamadı"
+  fi
+fi
 log "Docker ağı: ${CYAN}proxy${NC}"
 docker volume create portainer_data >/dev/null
 log "Volume: ${CYAN}portainer_data${NC}"
 
 PORTAINER_DIR=/root/portainer
 mkdir -p "$PORTAINER_DIR"
-write_managed "$PORTAINER_DIR/docker-compose.yml" 644 "Portainer compose dosyası" << 'EOF'
+PORTAINER_MANAGED=1
+write_managed "$PORTAINER_DIR/docker-compose.yml" 644 "Portainer compose dosyası" << 'EOF' || PORTAINER_MANAGED=0
 services:
   portainer:
     image: portainer/portainer-ce:latest
@@ -507,7 +556,17 @@ fi
 if [ "$PORTAINER_SKIP" -eq 0 ]; then
   run_with_spinner "Portainer başlatılıyor" \
     docker compose -f "$PORTAINER_DIR/docker-compose.yml" up -d
+fi
+
+# Panelin kapalı olduğu ancak compose dosyası bizim yazdığımız haldeyse ve
+# konteyner ondan üretildiyse söylenebilir. İkisinden biri atlandıysa bağlama
+# eski haliyle (0.0.0.0) duruyor olabilir — o zaman iddia etmek yerine uyar.
+if [ "$PORTAINER_MANAGED" -eq 1 ] && [ "$PORTAINER_SKIP" -eq 0 ]; then
   info "Panel: ${CYAN}127.0.0.1:9443${NC} — dışarıya kapalı, SSH tüneliyle girilir"
+else
+  PANELS_VERIFIED=0
+  warn "Portainer bağlaması ${RED}doğrulanmadı${NC} — panel internete açık olabilir:"
+  warn "${CYAN}docker ps --format '{{.Names}} {{.Ports}}'${NC} ile kontrol et"
 fi
 step_done
 
@@ -516,7 +575,8 @@ step_done
 step_header "Nginx Proxy Manager"
 NPM_DIR=/root/nginx-proxy-manager
 mkdir -p "$NPM_DIR"
-write_managed "$NPM_DIR/docker-compose.yml" 644 "NPM compose dosyası" << 'EOF'
+NPM_MANAGED=1
+write_managed "$NPM_DIR/docker-compose.yml" 644 "NPM compose dosyası" << 'EOF' || NPM_MANAGED=0
 services:
   app:
     image: jc21/nginx-proxy-manager:latest
@@ -537,7 +597,15 @@ networks:
 EOF
 log "docker-compose.yml: ${CYAN}${NPM_DIR}/${NC}"
 run_with_spinner "NPM başlatılıyor" docker compose -f "$NPM_DIR/docker-compose.yml" up -d
-info "Panel: ${CYAN}127.0.0.1:81${NC} — dışarıya kapalı, SSH tüneliyle girilir"
+
+if [ "$NPM_MANAGED" -eq 1 ]; then
+  info "Panel: ${CYAN}127.0.0.1:81${NC} — dışarıya kapalı, SSH tüneliyle girilir"
+else
+  PANELS_VERIFIED=0
+  warn "NPM bağlaması ${RED}doğrulanmadı${NC} — eski dosya 81'i internete açıyor olabilir,"
+  warn "üstelik varsayılan şifre hâlâ geçerliyse panel savunmasız. Kontrol et:"
+  warn "${CYAN}docker ps --format '{{.Names}} {{.Ports}}'${NC}"
+fi
 step_done
 
 
@@ -605,7 +673,11 @@ echo -e "   ${MAGENTA}❯${NC} SSH (root)   ${DIM}→${NC} ${YELLOW}ssh -p 3131 
 echo -e "   ${MAGENTA}❯${NC} SSH (deploy) ${DIM}→${NC} ${YELLOW}ssh -p 3131 ${DEPLOY_USERNAME}@${SERVER_IP}${NC}"
 echo ""
 
-echo -e "   ${BOLD}${WHITE}Yönetim Panelleri${NC} ${DIM}— internete kapalı, SSH tüneliyle girilir${NC}"
+if [ "$PANELS_VERIFIED" -eq 1 ]; then
+  echo -e "   ${BOLD}${WHITE}Yönetim Panelleri${NC} ${DIM}— internete kapalı, SSH tüneliyle girilir${NC}"
+else
+  echo -e "   ${BOLD}${WHITE}Yönetim Panelleri${NC} ${YELLOW}— bağlama DOĞRULANMADI, portları kontrol et${NC}"
+fi
 echo -e "   ${GRAY}────────────────────────────────────────────${NC}"
 echo -e "   ${MAGENTA}❯${NC} Portainer"
 echo -e "      ${YELLOW}ssh -p 3131 -L 9443:127.0.0.1:9443 root@${SERVER_IP}${NC}"
@@ -667,4 +739,10 @@ else
   echo ""
 fi
 
+# Çıkış kodu sözleşmesi: 0 = sunucu istenen durumda, 2 = sapma uygulanmadı.
+# Hatalarda err() zaten 1 ile çıkar. Bu ayrım olmadan bir CI adımı, tam
+# converge olmuş sunucu ile sapması duran sunucuyu ayırt edemez.
+if [ "$SKIPPED" -gt 0 ]; then
+  exit 2
+fi
 exit 0

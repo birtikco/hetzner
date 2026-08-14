@@ -34,7 +34,7 @@ Script'te şu logging fonksiyonları kullanılır:
 - `changed <mesaj>` — bir şey değiştirildi: `CHANGES` sayacını artırır, `log` basar
 - `skipped <mesaj>` — onay verilmedi, atlandı: `SKIPPED` sayacını artırır, `warn` basar
 - `confirm <soru>` — kesinti yaratan işlem öncesi sorar. `--yes` verilmişse evet; terminal yoksa (`curl | bash`, CI, nohup) hayır. Cevabı `/dev/tty`'den okur, o yüzden stdin heredoc/pipe olsa bile çalışır
-- `write_managed <hedef> <mod> <etiket>` — istenen içeriği stdin'den alır; dosya yoksa yazar, aynıysa dokunmaz, farklıysa `confirm` ile sorar
+- `write_managed <hedef> <mod> <etiket>` — istenen içeriği stdin'den alır; dosya yoksa yazar, aynıysa dokunmaz, farklıysa `confirm` ile sorar. **Dönüş değeri anlamlıdır:** `0` = dosya istenen halde, `1` = korundu (sapma sürüyor). Bu dosyaya dayanan bir iddiada bulunmadan önce dönüşü kontrol et — aksi halde "panel kapalı" gibi bir cümle, dosya korunduğu için açık kalan bir portu örter
 
 Yeni komutlar eklerken bu fonksiyonları kullan, standart `echo` kullanma.
 
@@ -131,9 +131,16 @@ sorulur. Etkileşimli terminal yoksa sessizce atlanır ve `SKIPPED` sayacına ya
 ile zorlanır. Bir adımın kesinti yaratıp yaratmadığından emin değilsen sor — sessizce
 uygulamak, üretimde kazara çalıştırıldığında geri alınamaz.
 
-**Sayaçlar:** `changed`/`skipped` helper'ları `CHANGES` ve `SKIPPED` sayaçlarını besler,
-ikisi de özet ekranında raporlanır. `CHANGES=0` ise banner "SUNUCU ZATEN İSTENEN DURUMDA"
-olur — kullanıcı tek bakışta hiçbir şeyin değişmediğini görür.
+**Sayaçlar ve çıkış kodu:** `changed`/`skipped` helper'ları `CHANGES` ve `SKIPPED`
+sayaçlarını besler. Banner üç durum ayırır: `SKIPPED>0` → "SAPMALAR UYGULANMADI",
+`CHANGES=0` → "SUNUCU ZATEN İSTENEN DURUMDA", aksi halde "KURULUM BAŞARIYLA TAMAMLANDI".
+Çıkış kodu sözleşmesi: **`0`** istenen durumda · **`2`** sapma uygulanmadı · **`1`** hata
+(`err`). CI bu ayrımı okur; değiştirirsen README'deki tabloyu da güncelle.
+
+**Bir güvenlik iddiası, dayandığı adım atlandıysa basılmaz.** "Panel dışarıya kapalı",
+"3 deneme → 24 saat ban" gibi cümleler yalnızca ilgili `write_managed` 0 döndüyse
+yazdırılır; aksi halde yerine uyarı geçer ve `PANELS_VERIFIED=0` ile özet ekranı da
+uyarıya döner. Sessizce yanlış güvence vermek, hiç bilgi vermemekten kötüdür.
 
 **UFW'de reset yok:** `ufw allow` zaten idempotent. `ufw --force reset` çağırmak, kullanıcının
 sonradan eklediği kuralları silerdi; o yüzden kaldırıldı, geri ekleme.

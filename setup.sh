@@ -1,6 +1,6 @@
 #!/bin/bash
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  Hetzner Ubuntu 24.04 LTS — Sunucu Kurulum Scripti                       ║
+# ║  Hetzner Ubuntu 24.04 / 26.04 LTS — Sunucu Kurulum Scripti               ║
 # ║                                                                          ║
 # ║  Kullanım:                                                               ║
 # ║    1) İnteraktif:  ./setup.sh                                            ║
@@ -45,7 +45,6 @@ spinner() {
   local message=$2
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   local i=0
-  # TERM tanımsızken tput non-zero döner; set -e altında bu scripti öldürürdü.
   tput civis 2>/dev/null || true
   while kill -0 "$pid" 2>/dev/null; do
     printf "\r  ${CYAN}${frames[i]}${NC} %s" "$message"
@@ -90,12 +89,7 @@ err()  { echo -e "\n  ${RED}✗ HATA:${NC} $1\n"; exit 1; }
 changed() { CHANGES=$((CHANGES+1));  log "$1"; }
 skipped() { SKIPPED=$((SKIPPED+1)); warn "$1"; }
 
-# Kesinti yaratan ya da kullanıcının elle değiştirmiş olabileceği bir şeye
-# dokunmadan önce sorulur. Cevap terminalden okunur — stdin heredoc ya da pipe
-# olabilir. Terminal yoksa (curl | bash, CI, nohup) sessizce hayır döner.
-# Cevap terminalden okunur — stdin heredoc ya da pipe olabilir. stdout terminal
-# değilse (CI, nohup, log'a yönlendirme) sorulmaz: nohup'ta /dev/tty açılabilir
-# ama okumak SIGTTIN ile süreci durdururdu.
+# Kesinti yaratan işlem öncesi sorar; terminal yoksa hayır döner.
 confirm() {
   if [ "$ASSUME_YES" -eq 1 ]; then return 0; fi
   [ -t 1 ] || return 1
@@ -105,9 +99,7 @@ confirm() {
   [[ "$answer" =~ ^[Yy]$ ]]
 }
 
-# İstenen içerik stdin'den okunur. Dosya yoksa yazılır, aynıysa dokunulmaz,
-# farklıysa kullanıcı elle değiştirmiş olabilir diye sorulur.
-# Dönüş: 0 = dosya istenen halde, 1 = korundu (sapma sürüyor).
+# İstenen içerik stdin'den. Dönüş: 0 = dosya istenen halde, 1 = korundu.
 write_managed() {
   local target=$1 mode=$2 label=$3
   local tmp rc=0
@@ -131,8 +123,6 @@ write_managed() {
 }
 
 # ─── ASCII Banner ────────────────────────────────────────────────────────────
-# TERM tanımsızken clear "TERM environment variable not set" deyip 1 döner;
-# set -e altında script daha ilk satırda ölürdü.
 clear 2>/dev/null || true
 echo ""
 echo -e "${MAGENTA}"
@@ -177,13 +167,12 @@ elif [ -t 0 ]; then
   echo -e "  ${YELLOW}SSH public key gerekli.${NC}"
   echo -e "  ${DIM}Yerel makinende: ${CYAN}cat ~/.ssh/id_ed25519.pub${NC}"
   echo ""
-  read -p "  Public key'i yapıştır: " SSH_KEY
+  read -r -p "  Public key'i yapıştır: " SSH_KEY
 else
   err "SSH key verilmedi ve terminal etkileşimli değil.\n     Örnek: ${CYAN}curl -fsSL <url> | SSH_KEY=\"ssh-ed25519 AAAA...\" bash${NC}"
 fi
 
-# Baş/son boşluk ve satır sonu temizlenir. Newline taşıyan bir değer (dosyadan
-# okunmuş secret) grep -F'te boş desene dönüşür ve her satırla eşleşirdi.
+# Baş/son boşluk ve satır sonu temizlenir.
 SSH_KEY=$(printf '%s' "$SSH_KEY" | tr -d '\r\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 
 # Format doğrulaması
@@ -219,9 +208,7 @@ ROOT_AUTH_KEYS=/root/.ssh/authorized_keys
 touch "$ROOT_AUTH_KEYS"
 chmod 600 "$ROOT_AUTH_KEYS"
 
-# -x zorunlu: -F tek başına alt dize eşler, yani 'from="10/8" ssh-ed25519 AAA...'
-# gibi kısıtlı bir satır key'i içerdiğinde script onu "zaten var" sayıp eklemez
-# ve adım 5'ten sonra sunucuya girilemez.
+# -x zorunlu: -F tek başına alt dize eşler.
 if grep -qxF "$SSH_KEY" "$ROOT_AUTH_KEYS"; then
   info "Root key zaten authorized_keys'te"
 else
@@ -252,8 +239,7 @@ PKG_OPTIONAL="htop tmux nano cmatrix neofetch"
 info "Zorunlu: ${DIM}${PKG_REQUIRED}${NC}"
 run_with_spinner "Zorunlu paketler kuruluyor" apt-get install -y $PKG_REQUIRED
 
-# Opsiyoneller kozmetik ve dağıtımdan kaldırılmış olabilirler (neofetch 26.04'te yok).
-# apt-get tek eksik pakette listenin tamamını reddettiği için önce süzülürler.
+# apt-get tek eksik pakette listenin tamamını reddeder; önce süzülür.
 PKG_FOUND=""
 PKG_MISSING=""
 for p in $PKG_OPTIONAL; do
@@ -304,9 +290,8 @@ chmod 600 "$AUTH_KEYS"
 
 SUDOERS_FILE="/etc/sudoers.d/${DEPLOY_USERNAME}"
 cat > "$SUDOERS_FILE" << EOF
-# CI/CD deploy-user — minimum yetki
-# Docker grubu üyeliği zaten docker komutlarına erişim sağlıyor.
-# Sudo sadece debug/diagnostic için.
+# CI/CD deploy-user — minimum yetki.
+# Docker erişimi grup üyeliğinden gelir; sudo yalnızca debug için.
 Cmnd_Alias DEPLOY_LOG = /usr/bin/journalctl, /usr/bin/journalctl *
 Cmnd_Alias DEPLOY_FW  = /usr/sbin/ufw status, /usr/sbin/ufw status verbose
 
@@ -331,15 +316,12 @@ SSHD_DROPIN=/etc/ssh/sshd_config.d/99-hardening.conf
 SSHD_KEYS='Port|PermitRootLogin|PasswordAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication|MaxAuthTries|AllowUsers'
 SSHD_CHECK='port|permitrootlogin|passwordauthentication|kbdinteractiveauthentication|maxauthtries|allowusers'
 
-# sshd ilk gördüğü değeri kullanır — cloud imajlarındaki 50-cloud-init.conf
-# drop-in'imizi gölgelemesin diye çakışan direktifler önce yorumlanır.
+# sshd ilk gördüğü değeri kullanır: çakışan direktifler önce yorumlanır.
 mkdir -p /etc/ssh/sshd_config.d
 grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config \
   || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
 shopt -s nullglob
-# I bayrağı ve '=' şart: sshd anahtar kelimeleri büyük/küçük harf duyarsızdır ve
-# 'PasswordAuthentication=yes' de geçerlidir. İkisi de kaçarsa drop-in gölgelenir
-# ve doğrulama her koşuda scripti durdurur.
+# I bayrağı ve '=' şart: anahtar kelimeler harf duyarsız, 'Key=value' de geçerli.
 sed -i -E "s/^[[:space:]]*(${SSHD_KEYS})([[:space:]]|=)/#&/I" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf
 shopt -u nullglob
 
@@ -355,9 +337,7 @@ chmod 600 "$SSHD_DROPIN"
 
 "$SSHD_BIN" -t || err "sshd yapılandırması geçersiz, SSH servisine dokunulmadı"
 
-# sshd -T her AllowUsers girdisini ayrı satırda basar. permitrootlogin'i OpenSSH 9
-# eski adıyla (without-password), OpenSSH 10 yeni adıyla raporlar; aynı ayar olduğu
-# için karşılaştırmadan önce tek isme indirilir.
+# AllowUsers satır satır basılır; permitrootlogin OpenSSH sürümüne göre iki adla raporlanır.
 SSHD_WANT=$(printf '%s\n' \
   "allowusers root" \
   "allowusers ${DEPLOY_USERNAME}" \
@@ -393,8 +373,7 @@ ListenStream=[::]:3131
 EOF
 
 systemctl daemon-reload >/dev/null 2>&1
-# Susturulursa set -e burada öldürür ve aşağıdaki kilitlenme uyarısına hiç
-# ulaşılmaz — oysa bu adımın en değerli çıktısı o uyarı.
+# Susturulursa aşağıdaki kilitlenme uyarısına hiç ulaşılmaz.
 if ! SSH_RESTART_OUT=$(systemctl restart ssh.socket ssh 2>&1); then
   echo "$SSH_RESTART_OUT" | sed 's/^/      /'
   err "SSH servisi yeniden başlatılamadı — açık oturumunu KAPATMA"
@@ -432,8 +411,7 @@ if ! F2B_OUT=$(systemctl enable --now fail2ban 2>&1); then
 fi
 systemctl reload fail2ban >/dev/null 2>&1 || true
 
-# Kural metni yalnızca dosya gerçekten yazıldıysa doğrudur; korunduysa ekranda
-# yazan politika ile sunucuda geçerli olan farklıdır.
+# Kural metni yalnızca dosya gerçekten yazıldıysa doğrudur.
 if [ "$F2B_MANAGED" -eq 1 ]; then
   log "Kural: ${CYAN}3 deneme${NC} → ${RED}24 saat ban${NC}"
   log "Tekrar suçluya: ${YELLOW}katlanarak artar${NC} (max 1 hafta)"
@@ -448,8 +426,7 @@ step_done
 step_header "UFW Güvenlik Duvarı"
 command -v ufw >/dev/null || err "ufw kurulu değil — 3. adımdaki paket kurulumu başarısız olmuş"
 
-# reset yok: 'ufw allow' zaten idempotent, reset ise sonradan elle eklenen
-# kuralları silip tekrar çalıştırmayı yıkıcı yapardı.
+# reset yok: 'ufw allow' zaten idempotent, reset elle eklenen kuralları silerdi.
 run_with_spinner "Varsayılan politika" \
   bash -c "ufw default deny incoming && ufw default allow outgoing"
 run_with_spinner "SSH / HTTP / HTTPS izinleri" \
@@ -468,8 +445,7 @@ step_done
 # ─── 8. DOCKER ───────────────────────────────────────────────────────────────
 step_header "Docker"
 install -m 0755 -d /etc/apt/keyrings
-# --batch --yes olmadan gpg, hedef dosya varsa 'File exists' deyip çıkar; ikinci
-# koşuda dosya hep vardır ve script burada ölürdü.
+# --batch --yes şart: gpg hedef dosya varsa 'File exists' deyip çıkar.
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
   | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg \
   || err "Docker GPG anahtarı alınamadı"
@@ -478,8 +454,7 @@ DOCKER_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAM
 DOCKER_ARCH=$(dpkg --print-architecture)
 DOCKER_REPO="https://download.docker.com/linux/ubuntu"
 
-# Depoyu sabit yazmak yerine dağıtımdan oku; olmayan sürüme sessizce yanlış
-# paket kurmaktansa durmak yeğdir.
+# Depo yoksa dur: yanlış sürüme sessizce paket kurmaktansa.
 curl -fsI --max-time 15 "${DOCKER_REPO}/dists/${DOCKER_CODENAME}/Release" >/dev/null 2>&1 \
   || err "Docker'ın ${DOCKER_CODENAME} deposu yok — bu Ubuntu sürümü desteklenmiyor"
 
@@ -537,9 +512,7 @@ networks:
     external: true
 EOF
 
-# Eski kurulumlarda Portainer 'docker run' ile başlatılmıştı; o konteynerde compose
-# etiketi yoktur ve compose onu devralamaz, isim çakışır. Yeniden yaratmak kısa
-# kesinti demek, o yüzden sorulur — veri portainer_data volume'ünde, kaybolmaz.
+# 'docker run' ile kurulmuş konteyneri compose devralamaz; taşımak kısa kesinti demek.
 PORTAINER_SKIP=0
 PORTAINER_EXISTS=$(docker ps -aq --filter "name=^portainer$")
 PORTAINER_COMPOSE=$(docker ps -aq --filter "name=^portainer$" --filter "label=com.docker.compose.project")
@@ -558,9 +531,7 @@ if [ "$PORTAINER_SKIP" -eq 0 ]; then
     docker compose -f "$PORTAINER_DIR/docker-compose.yml" up -d
 fi
 
-# Panelin kapalı olduğu ancak compose dosyası bizim yazdığımız haldeyse ve
-# konteyner ondan üretildiyse söylenebilir. İkisinden biri atlandıysa bağlama
-# eski haliyle (0.0.0.0) duruyor olabilir — o zaman iddia etmek yerine uyar.
+# İddia yalnız compose dosyası bizimken ve konteyner ondan üretildiyse doğrudur.
 if [ "$PORTAINER_MANAGED" -eq 1 ] && [ "$PORTAINER_SKIP" -eq 0 ]; then
   info "Panel: ${CYAN}127.0.0.1:9443${NC} — dışarıya kapalı, SSH tüneliyle girilir"
 else
@@ -610,8 +581,7 @@ step_done
 
 
 # ─── ÖZET EKRANI ─────────────────────────────────────────────────────────────
-# IPv4 açıkça istenir: curl varsayılanda IPv6'yı tercih eder ve GitHub Actions
-# runner'ları IPv6 ile bağlanamaz. Dış servis düşerse yerel arayüzden okunur.
+# IPv4 açıkça istenir: GitHub Actions runner'ları IPv6 ile bağlanamaz.
 SERVER_IP=$(curl -4 -s --max-time 10 ifconfig.me 2>/dev/null || true)
 if [ -z "$SERVER_IP" ]; then
   SERVER_IP=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
@@ -719,7 +689,7 @@ echo ""
 
 echo -e "   ${GRAY}─────────────────────────────────────────────${NC}"
 if [ -t 0 ]; then
-  read -p "   $(echo -e ${YELLOW})Sunucuyu yeniden başlatayım mı?$(echo -e ${NC}) (y/n): " CONFIRM
+  read -r -p "   $(echo -e "${YELLOW}")Sunucuyu yeniden başlatayım mı?$(echo -e "${NC}") (y/n): " CONFIRM
   echo ""
 else
   CONFIRM=n
@@ -739,9 +709,7 @@ else
   echo ""
 fi
 
-# Çıkış kodu sözleşmesi: 0 = sunucu istenen durumda, 2 = sapma uygulanmadı.
-# Hatalarda err() zaten 1 ile çıkar. Bu ayrım olmadan bir CI adımı, tam
-# converge olmuş sunucu ile sapması duran sunucuyu ayırt edemez.
+# Çıkış kodu: 0 = istenen durumda, 2 = sapma uygulanmadı, 1 = hata (err).
 if [ "$SKIPPED" -gt 0 ]; then
   exit 2
 fi

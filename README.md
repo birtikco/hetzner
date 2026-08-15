@@ -1,31 +1,36 @@
 # Hetzner Server Setup
 
-Ubuntu 24.04 üzerinde çalışan Hetzner Cloud sunucuları için otomatik kurulum ve sertleştirme scripti.
+[![Lint](https://github.com/birtikco/hetzner/actions/workflows/lint.yml/badge.svg)](https://github.com/birtikco/hetzner/actions/workflows/lint.yml)
 
-Tek komutla **Docker + Portainer + Nginx Proxy Manager** kuruyor, **fail2ban + UFW + SSH sertleştirme** ile güvenlik temelini atıyor.
+Ubuntu 24.04 / 26.04 LTS üzerinde çalışan Hetzner Cloud sunucuları için otomatik kurulum ve sertleştirme scripti.
+
+Tek komutla **Docker + Portainer + Nginx Proxy Manager** kuruyor, **fail2ban + UFW + SSH sertleştirme** ile güvenlik temelini atıyor. Tekrar çalıştırılabilir: eksiği tamamlar, doğru olana dokunmaz.
+
+**İçindekiler:** [Hızlı Başlangıç](#-hızlı-başlangıç) · [Ne Kuruyor?](#-ne-kuruyor) · [Güvenlik](#-güvenlik-yapılandırması) · [Panellere Erişim](#-yönetim-panellerine-erişim) · [Kullanım](#-kullanım-yöntemleri) · [Container Dağıtımı](#-docker-container-dağıtım-akışı) · [CI/CD](#-cicd-bağlantısı-github-actions) · [Gereksinimler](#-gereksinimler) · [Sorun Giderme](#-sorun-giderme)
 
 ---
 
 ## 🚀 Hızlı Başlangıç
 
-### Lokalde
+### 1. Başlamadan önce
 
-- SSH Public Key al:
+- [ ] Elinde bir SSH key çifti var → `cat ~/.ssh/id_ed25519.pub` (yoksa: `ssh-keygen -t ed25519`)
+- [ ] Sunucuya root olarak erişebiliyorsun
+- [ ] Sunucu taze kurulmuş ya da rebuild edilmiş bir Ubuntu 24.04 / 26.04
 
-```bash
-cat ~/.ssh/id_ed25519.pub
-```
+> ⚠️ Script şifreyle SSH girişini **kapatır** ve portu **3131**'e taşır. Public key'i doğru
+> yapıştırdığından emin ol — yanlış key'le sunucuya bir daha giremezsin, rebuild gerekir.
 
-### Mevcut sunucuda (build/rebuild sonrası)
+### 2. Sunucuda çalıştır
 
-- Tek satırda (Bash 4+ gerektirir):
+Tek satırda:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/birtikco/hetzner/refs/heads/main/setup.sh | \
   SSH_KEY="ssh-ed25519 AAAA... user@host" DEPLOY_KEY="ssh-ed25519 AAAA... user@host" bash
 ```
 
-- Veya manuel:
+Veya indirip çalıştır:
 
 ```bash
 wget https://raw.githubusercontent.com/birtikco/hetzner/refs/heads/main/setup.sh
@@ -35,12 +40,28 @@ chmod +x setup.sh
 
 `DEPLOY_KEY` opsiyoneldir — verilmezse root key'i deploy-user için de kullanılır.
 
+### 3. Sonrasında
+
+Script biterken sunucu IP'sini, bağlantı komutlarını ve sıradaki adımları ekrana yazar.
+İlk iş yeni portla bağlanabildiğini doğrulamak:
+
+```bash
+ssh-keygen -R <SERVER_IP>          # eski host key'i temizle
+ssh -p 3131 root@<SERVER_IP>       # yeni portla bağlan
+```
+
 ---
 
 ## 📦 Ne Kuruyor?
 
 ### Sistem paketleri
-`curl` `wget` `git` `ufw` `fail2ban` `ca-certificates` `gnupg` `htop` `tmux` `neofetch` `cmatrix` `nano`
+
+| Grup | Paketler | Eksikse |
+| --- | --- | --- |
+| Zorunlu | `curl` `wget` `git` `ufw` `fail2ban` `ca-certificates` `gnupg` | Script durur |
+| Opsiyonel | `htop` `tmux` `nano` `cmatrix` `neofetch` | Atlanır, uyarı basılır |
+
+`neofetch` Ubuntu 26.04'te kaldırıldı; opsiyonel olduğu için kurulum etkilenmez.
 
 ### Docker yığını
 - **Docker CE** + Compose plugin + Buildx plugin
@@ -137,7 +158,7 @@ docker compose -f /root/portainer/docker-compose.yml up -d
 
 ## 🎯 Kullanım Yöntemleri
 
-`setup.sh` SSH public key'i 3 farklı şekilde kabul eder:
+`setup.sh` SSH public key'i üç kaynaktan alır — sırayla argüman, ortam değişkeni, interaktif soru:
 
 ```bash
 # 1. Komut satırı argümanı
@@ -207,8 +228,6 @@ Block Common Exploits'siz, access list'siz.
 ### docker-compose.yml ile Dağıtım
 
 ```yaml
-version: '3.8'
-
 services:
   app:
     image: proje-adi:latest
@@ -311,9 +330,9 @@ proxy host'ta **Forward Port** olarak container'ın iç portunu (`3000`) yaz.
 ### Dockerfile Gereksinimleri
 
 - Repository root'unda `Dockerfile` olmalı
-- Node.js projelerine `node:22-alpine` veya daha güncel version kullan (`node:20-alpine` değil)
-- `EXPOSE` ile container'ın dinlediği port belirt (örn: `EXPOSE 3000`)
-- Production build'i yap (`npm ci --omit=dev`, değil `npm install`)
+- Node.js projelerinde `node:22-alpine` veya daha güncel bir imaj kullan (`node:20-alpine` değil)
+- `EXPOSE` ile container'ın dinlediği portu belirt (örn: `EXPOSE 3000`)
+- Production kurulumu yap: `npm install` değil, `npm ci --omit=dev`
 
 ### Deploy User Yetkileri
 
@@ -389,6 +408,16 @@ Ayrıntı: [Yönetim Panellerine Erişim](#-yönetim-panellerine-erişim)
 - Portainer proxy host'unda scheme **HTTPS** mi? (Portainer kendi TLS'ini konuşur)
 - Container çalışıyor mu? → `docker ps`
 
+### Script "SAPMALAR UYGULANMADI" dedi (çıkış kodu 2)
+
+Kurulum bozulmadı — bir veya daha fazla adım onay isteyip alamadı. En sık nedeni: elle
+düzenlediğin bir dosya (`jail.local`, compose dosyaları) ile scriptin istediği içerik
+farklı ve terminal etkileşimli değil (`curl | bash`, CI).
+
+- Değişikliğin bilinçliyse: bir şey yapman gerekmiyor, sunucu çalışıyor
+- Scriptin halini geri istiyorsan: `./setup.sh --yes "ssh-ed25519 AAAA..."`
+- Hangi dosyanın atlandığı çıktının sonunda `!` işaretiyle yazılı
+
 ### Let's Encrypt "Internal Error"
 - DNS A kaydı doğru IP'ye mi bakıyor? → `dig <domain> +short`
 - 5/168h rate limit'e takıldıysan farklı subdomain dene
@@ -400,10 +429,29 @@ Ayrıntı: [Yönetim Panellerine Erişim](#-yönetim-panellerine-erişim)
 
 ```
 .
-├── setup.sh                    # Mevcut sunucuda çalıştırılan kurulum scripti
+├── setup.sh                    # Sunucuda çalıştırılan kurulum scripti
 ├── README.md                   # Bu dosya
-└── CLAUDE.md                   # Claude Code için proje rehberi (standartlar, adımlar, politikalar)
+├── CLAUDE.md                   # Claude Code için proje rehberi (kurallar, gerekçeler)
+├── LICENSE                     # MIT
+└── .github/
+    ├── checks.sh               # Script ↔ doküman tutarlılık kontrolleri
+    └── workflows/lint.yml      # CI: shellcheck + bash -n + checks.sh
 ```
+
+### Katkı verirken
+
+Commit öncesi lokalde çalıştır — CI aynısını koşar:
+
+```bash
+bash -n setup.sh                 # sözdizimi
+shellcheck -S warning setup.sh   # lint
+./.github/checks.sh              # script ile dokümanlar uyumlu mu
+```
+
+`checks.sh` şunları doğrular: `TOTAL_STEPS` gerçek adım sayısıyla eşleşiyor mu · SSH portu
+üç dosyada da aynı mı · çıkış kodu sözleşmesi belgeli mi · strict mode yerinde mi · kurulan
+her paket README tablosunda mı · yönetilen dosyalar `write_managed` ile mi yazılıyor ·
+scriptte uzun yorum bloğu kalmış mı.
 
 ---
 

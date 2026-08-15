@@ -1,0 +1,34 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shell:
+    name: Shell script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sözdizimi (bash -n)
+        run: bash -n setup.sh
+
+      - name: ShellCheck
+        run: shellcheck -S warning -f gcc setup.sh
+
+      - name: Çalıştırma izni
+        run: |
+          # curl | bash ile kullanılsa da wget ile indirenler chmod beklemesin.
+          test -x setup.sh || { echo "setup.sh çalıştırılabilir değil: git update-index --chmod=+x setup.sh"; exit 1; }
+
+  consistency:
+    name: Doküman tutarlılığı
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Script ↔ README ↔ CLAUDE.md
+        run: ./.github/checks.sh
